@@ -349,8 +349,6 @@ globalThis.LabConfig = {
   practicePair: "P0",
   imageGroups: [["L1", "K1"], ["L2", "K2"], ["O1", "B1"], ["O2", "B2"]],
   conditionOrder: ["ABDC", "BCAD", "CDBA", "DACB"],
-  // GitHub Pages deployment fills in the shared allocator URL.
-  allocation: { endpoint: "", required: false, timeoutMs: 8000 },
   upload: {
     enabled: true,
     endpoint: "https://attention-lab-production.up.railway.app/api/hw2/submit",
@@ -363,8 +361,6 @@ globalThis.LabConfig = {
 };
 
 
-LabConfig.allocation.required = true;
-LabConfig.allocation.endpoint = "https://visual-search-detective.oneheijialun.workers.dev/allocate";
 </script>
 <script>
 "use strict";
@@ -1167,10 +1163,8 @@ globalThis.LabData = (() => {
   const volatile = new Map();
   const activeKey = namespace + "active";
   const registrationKey = namespace + "registration";
-  const allocationKey = namespace + "allocation:" + cfg.studyVersion;
   const activeUploads = new Set();
   let active = null;
-  let pendingAllocation = null;
   let registration = null;
   let storageOK = true;
 
@@ -1253,37 +1247,7 @@ globalThis.LabData = (() => {
   function allocateSlot() {
     const explicit = readSlot();
     if (explicit !== null) return {slot:explicit,source:"manual"};
-    const sequenceKey = namespace + "sequence";
-    const seq = read(sequenceKey,null) ?? random(design.slotCount/4)*4;
-    write(sequenceKey,(seq+1)%design.slotCount);
-    return {slot:seq,source:"local"};
-  }
-  function sharedAllocation() {
-    return !cfg.preview && Boolean(cfg.allocation.endpoint);
-  }
-  function recruitmentOpen() {
-    return cfg.preview || !cfg.allocation.required || sharedAllocation();
-  }
-  async function reserveSlot() {
-    try { pendingAllocation ??= sessionStorage.getItem(allocationKey); }
-    catch { storageOK = false; }
-    pendingAllocation ??= randomId();
-    try { sessionStorage.setItem(allocationKey,pendingAllocation); }
-    catch { storageOK = false; }
-    const controller = new AbortController();
-    const timeout = setTimeout(()=>controller.abort(),cfg.allocation.timeoutMs);
-    try {
-      const response = await fetch(cfg.allocation.endpoint,{
-        method:"POST",credentials:"omit",cache:"no-store",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({request_id:pendingAllocation}),signal:controller.signal
-      });
-      if (!response.ok) throw new Error("Allocation request rejected");
-      const {sequence} = await response.json();
-      if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error("Invalid allocation sequence");
-      return {slot:(sequence-1)%design.slotCount,source:"shared",sequence};
-    } finally {
-      clearTimeout(timeout);
-    }
+    return {slot:random(design.slotCount),source:"random"};
   }
   function uploadEnabled() {
     return !cfg.preview && cfg.upload.enabled && /^[A-Z0-9]{6}$/.test(cfg.upload.projectId) && Boolean(cfg.upload.endpoint);
@@ -1312,25 +1276,19 @@ globalThis.LabData = (() => {
     } catch { storageOK = false; }
     return registration?.sessionId===session.session_id ? registration.profile : null;
   }
-  function create(gazeAllowed,reservation) {
-    if (!recruitmentOpen() || (sharedAllocation() && !reservation)) throw new Error("Shared allocation required");
-    const {slot,source,sequence} = reservation ?? allocateSlot();
+  function create(gazeAllowed) {
+    const {slot,source} = allocateSlot();
     const session = {
       schema_version:1, study_version:cfg.studyVersion, project_id:cfg.preview ? null : cfg.upload.projectId || null,
       ...(cfg.preview ? {preview:true} : {}),
       experiment:cfg.upload.experiment, session_id:randomId(),
       participant_id:participantId(), consent:true, start_time:new Date().toISOString(), end_time:null,
-      completion_status:"in_progress", assignment:{...design.makeSchedule(slot),source,sequence}, settings:{...cfg.timing},
+      completion_status:"in_progress", assignment:{...design.makeSchedule(slot),source}, settings:{...cfg.timing},
       gaze_consent:gazeAllowed, gaze_status:gazeAllowed ? "requested" : "off",
       practice_done:false, pending:null, trials:[], interruptions:[], upload:{status:"pending",attempts:0}
     };
     save(session);
     setActive(session);
-    if (reservation) {
-      pendingAllocation = null;
-      try { sessionStorage.removeItem(allocationKey); }
-      catch { storageOK = false; }
-    }
     return session;
   }
 
@@ -1414,7 +1372,7 @@ globalThis.LabData = (() => {
     setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
 
-  return {list,save,setActive,getActive,withdraw,create,sharedAllocation,recruitmentOpen,reserveSlot,
+  return {list,save,setActive,getActive,withdraw,create,
     validateRegistration,rememberRegistration,getRegistration,upload,uploadEnabled,canUpload,bundle,importBundle,download,
     isSending:session=>activeUploads.has(session.session_id),
     get storageOK() { return storageOK; }};
@@ -1635,9 +1593,9 @@ globalThis.LabResults = (() => {
           </div>
           <div class="hero-visual"><img src="${design.assetUrl("detective.png")}" alt="" width="1448" height="1086" fetchpriority="high"></div>
           <div class="hero-actions">
-            <button class="button primary" id="begin" ${data.recruitmentOpen() ? "" : "disabled"}>${!data.recruitmentOpen() ? "报名尚未开放" : saved ? "继续上次实验" : "领取任务"} ${arrow}</button>
+            <button class="button primary" id="begin">${saved ? "继续上次实验" : "领取任务"} ${arrow}</button>
             ${config.preview ? '<button class="button secondary" id="report-example">预览结果页</button>' : ""}
-            <span class="hero-note">${!data.recruitmentOpen() ? "统一招募服务准备中" : config.preview ? "试玩记录保存在本机" : "先阅读知情同意"}</span>
+            <span class="hero-note">${config.preview ? "试玩记录保存在本机" : "先阅读知情同意"}</span>
           </div>
         </div>
       </section>
@@ -1662,7 +1620,7 @@ globalThis.LabResults = (() => {
       <p class="lead">本实验是工程心理学课程作业。你将观察交替出现的室内插图，并用鼠标或手指点选变化位置。</p>
       <div class="info-list">
         <div class="info-row"><strong>你将完成什么</strong><p>先做一个练习，再完成 ${total} 个正式试次。每轮有时间上限，可在轮次间休息。</p></div>
-        <div class="info-row"><strong>记录哪些数据</strong><p>网页分配五位匿名编号，记录反应时间、画面循环和点击表现。${data.sharedAllocation() ? "试次顺序由分配服务用随机请求码确定。" : ""}${data.uploadEnabled() ? "完成后，匿名正式试次会提交到课程注意实验室。" : "匿名记录保存在本浏览器，可由实验者导出。"}</p></div>
+        <div class="info-row"><strong>记录哪些数据</strong><p>网页分配五位匿名编号，记录反应时间、画面循环和点击表现。${data.uploadEnabled() ? "完成后，匿名正式试次会提交到课程注意实验室。" : "匿名记录保存在本浏览器，可由实验者导出。"}</p></div>
         <div class="info-row"><strong>自愿参加</strong><p>任务包含快速交替画面。如果你对闪烁敏感或感到不适，可以随时停止。完成前可退出并清除本次作答记录。</p></div>
       </div>
       <form id="consent-form">
@@ -1688,7 +1646,6 @@ globalThis.LabResults = (() => {
     const agree = $("#agree");
     const consentCheck = $("#consent-check");
     const gazeCheck = $("#gaze-check");
-    const fields = $("#registration-fields");
     const affiliation = $("#affiliation");
     const studentId = $("#student-id");
     function updateStudentField() {
@@ -1700,7 +1657,7 @@ globalThis.LabResults = (() => {
     }
     affiliation.onchange = updateStudentField;
     updateStudentField();
-    form.onsubmit = async event => {
+    form.onsubmit = event => {
       event.preventDefault();
       if (!consentCheck.checked || agree.disabled) return;
       let profile;
@@ -1712,26 +1669,12 @@ globalThis.LabResults = (() => {
         return;
       }
       agree.disabled = true;
-      consentCheck.disabled = true;
-      fields.disabled = true;
-      if (gazeCheck) gazeCheck.disabled = true;
-      const shared = data.sharedAllocation();
       try {
-        if (shared) {
-          $("#status").dataset.level = "";
-          $("#status").textContent = "正在分配试次顺序…";
-        }
-        const reservation = shared ? await data.reserveSlot() : undefined;
-        if ($("#consent-form") !== form) return;
-        session = data.create(Boolean(gazeCheck?.checked),reservation);
+        session = data.create(Boolean(gazeCheck?.checked));
         data.rememberRegistration(session,profile);
       } catch {
-        if ($("#consent-form") !== form) return;
-        alertText(shared ? "暂时无法分配试次。请检查网络，再点「同意并继续」重试。" : "无法建立本次记录，请检查浏览器设置后重试。");
+        alertText("无法建立本次记录，请检查浏览器设置后重试。");
         agree.disabled = false;
-        consentCheck.disabled = false;
-        fields.disabled = false;
-        if (gazeCheck) gazeCheck.disabled = false;
         return;
       }
       instructions();
@@ -1968,21 +1911,18 @@ globalThis.LabResults = (() => {
     const link = new URL(location.href);
     link.hash = "";
     link.search = "";
-    if (data.sharedAllocation()) {
-      return `<section class="admin-panel"><h2>统一招募链接</h2>
-        <p class="subtle">把同一个链接发给所有参与者。参与者同意后，系统按收到同意的先后轮换试次顺序和图片组合。</p>
-        <div class="actions"><input class="share-link" id="share-link" aria-label="统一招募链接" readonly value="${esc(link.href)}">
-        <button class="button primary" id="copy-link">复制链接</button></div>
-        <p class="status" id="copy-status" role="status"></p></section>`;
-    }
+    const share = esc(link.href);
     const links = Array.from({length:design.slotCount},(_,i)=>{
       link.search = "?slot="+(i+1);
       const assignment = design.makeSchedule(i);
       return `<a href="${esc(link.href)}" target="_blank" rel="noopener">方案 ${i+1} · ${assignment.order} · 轮换 ${assignment.rotation+1}</a>`;
     }).join("");
-    return `<section class="admin-panel"><h2>平衡分配链接</h2>
-      <p class="subtle">本机可点选不同方案。前四个方案平衡四种条件顺序与图片轮换。上线并接通共享分配后，所有参与者使用同一个链接。</p>
-      <div class="slot-grid">${links}</div></section>`;
+    return `<section class="admin-panel"><h2>统一招募链接</h2>
+      <p class="subtle">同一链接可以发给所有参与者。每次报名时，浏览器会随机抽取一套试次顺序与图片组合。</p>
+      <div class="actions"><input class="share-link" id="share-link" aria-label="统一招募链接" readonly value="${share}">
+      <button class="button primary" id="copy-link">复制链接</button></div>
+      <p class="status" id="copy-status" role="status"></p>
+      <details><summary>手动指定方案</summary><div class="slot-grid">${links}</div></details></section>`;
   }
   function dashboard(note = "") {
     if (session?.completion_status==="in_progress") return;
